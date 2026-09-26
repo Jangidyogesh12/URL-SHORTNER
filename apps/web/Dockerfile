@@ -13,7 +13,9 @@ FROM node:22-slim AS builder
 WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+COPY package.json package-lock.json ./
+COPY packages ./packages
+COPY apps/web ./apps/web
 
 RUN npm run build --workspace=web
 
