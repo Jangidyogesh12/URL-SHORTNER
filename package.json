@@ -14,6 +14,11 @@
     "build": "npm run types && npm run build:web && npm run build:api",
     "generate-types": "cargo run -p shared --bin export",
     "check": "cargo check --workspace",
+    "migrate:up": "sqlx migrate run --source apps/api/migrations",
+    "migrate:down": "sqlx migrate revert --source apps/api/migrations",
+    "migrate:add": "sqlx migrate add -r --source apps/api/migrations",
+    "migrate:info": "sqlx migrate info --source apps/api/migrations",
+    "db:reset": "docker compose exec -T db sh -c 'psql -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -v ON_ERROR_STOP=1 -c \"DROP SCHEMA public CASCADE; CREATE SCHEMA public;\"'",
     "docker:up": "docker compose up --build",
     "docker:down": "docker compose down"
   },
