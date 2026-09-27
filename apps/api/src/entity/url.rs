@@ -9,5 +9,5 @@ pub struct Url {
     pub short_code: String,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
-    pub expires_at: OffsetDateTime,
+    pub expires_at: Option<OffsetDateTime>,
 }

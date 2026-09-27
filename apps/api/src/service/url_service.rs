@@ -16,6 +16,7 @@ use uuid::Uuid;
 const SHORT_CODE_LENGTH: usize = 8;
 const SHORT_CODE_MAX_ATTEMPTS: usize = 5;
 const URL_EXPIRATION_DAYS: i64 = 30;
+const ALLOWED_EDIT_LIFETIME_MINUTES: [i64; 4] = [30, 120, 10080, 525600];
 const BASE62_ALPHABET: &[u8; 62] =
     b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
@@ -53,7 +54,10 @@ impl UrlService {
             .find_by_user_and_long_url(user.id, long_url.clone())
             .await
         {
-            if url.expires_at > OffsetDateTime::now_utc() {
+            let already_active = url
+                .expires_at
+                .map_or(true, |expires_at| expires_at > OffsetDateTime::now_utc());
+            if already_active {
                 let dto = UrlReadDto::from(url);
                 self.url_cache.set_url(Some(user.id), &dto).await;
                 return Ok((dto, false));
@@ -74,7 +78,7 @@ impl UrlService {
                 short_code,
                 created_at: now,
                 updated_at: now,
-                expires_at: now + Duration::days(URL_EXPIRATION_DAYS),
+                expires_at: Some(now + Duration::days(URL_EXPIRATION_DAYS)),
             })
             .await?;
 
@@ -101,7 +105,10 @@ impl UrlService {
             .await
             .ok_or(UrlError::UrlNotFound)?;
 
-        if url.expires_at <= OffsetDateTime::now_utc() {
+        if url
+            .expires_at
+            .map_or(false, |expires_at| expires_at <= OffsetDateTime::now_utc())
+        {
             return Err(UrlError::UrlExpired.into());
         }
 
@@ -145,6 +152,7 @@ impl UrlService {
         user: &User,
         short_code: String,
         new_url: String,
+        expires_in_minutes: Option<i64>,
     ) -> Result<UrlReadDto, ApiError> {
         let url = self
             .url_repo
@@ -152,19 +160,24 @@ impl UrlService {
             .await
             .ok_or(UrlError::ShortCodeNotFound)?;
 
+        let expires_at = expiry_from_lifetime(expires_in_minutes)?;
+
         if let Some(existing) = self
             .url_repo
             .find_by_user_and_long_url(user.id, new_url.clone())
             .await
         {
-            if existing.expires_at > OffsetDateTime::now_utc() {
+            let already_active = existing.expires_at.map_or(true, |expires_at| {
+                expires_at > OffsetDateTime::now_utc()
+            });
+            if already_active && existing.id != url.id {
                 return Err(UrlError::UrlAlreadyExists.into());
             }
         }
 
         let updated = self
             .url_repo
-            .update_long_url(user.id, short_code, new_url)
+            .update_url(user.id, short_code, new_url, expires_at)
             .await?
             .ok_or(UrlError::ShortCodeNotFound)?;
 
@@ -195,7 +208,10 @@ impl UrlService {
             .await
             .ok_or(UrlError::ShortCodeNotFound)?;
 
-        if url.expires_at <= OffsetDateTime::now_utc() {
+        if url
+            .expires_at
+            .map_or(false, |expires_at| expires_at <= OffsetDateTime::now_utc())
+        {
             return Err(UrlError::UrlExpired.into());
         }
 
@@ -234,10 +250,29 @@ impl UrlService {
     }
 }
 
+fn expiry_from_lifetime(
+    expires_in_minutes: Option<i64>,
+) -> Result<Option<OffsetDateTime>, ApiError> {
+    match expires_in_minutes {
+        None => Ok(None),
+        Some(minutes)
+            if ALLOWED_EDIT_LIFETIME_MINUTES.contains(&minutes) =>
+        {
+            Ok(Some(
+                OffsetDateTime::now_utc() + Duration::minutes(minutes),
+            ))
+        }
+        Some(_) => Err(UrlError::InvalidLifetime.into()),
+    }
+}
+
 fn is_alive(url: &UrlReadDto) -> bool {
-    OffsetDateTime::parse(&url.expires_at, &Rfc3339)
-        .map(|expires_at| expires_at > OffsetDateTime::now_utc())
-        .unwrap_or(false)
+    match &url.expires_at {
+        Some(expires_at) => OffsetDateTime::parse(expires_at, &Rfc3339)
+            .map(|expires_at| expires_at > OffsetDateTime::now_utc())
+            .unwrap_or(false),
+        None => true,
+    }
 }
 
 fn generate_short_code(user_id: &Uuid, long_url: &str, salt: Option<&str>) -> String {

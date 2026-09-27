@@ -59,7 +59,7 @@ impl UrlCacheRepositoryTrait for UrlCacheRepository {
     }
 
     async fn set_url(&self, user_id: Option<Uuid>, url: &UrlReadDto) {
-        let ttl = match Self::ttl_seconds(url) {
+        let ttl = match Self::cache_ttl(url) {
             Some(ttl) => ttl,
             None => {
                 warn!("skipping cache set: invalid expires_at");
@@ -78,17 +78,25 @@ impl UrlCacheRepositoryTrait for UrlCacheRepository {
         let mut conn = self.cache_conn.get_manager().clone();
 
         if let Some(user_id) = user_id {
-            let result: RedisResult<()> = conn
-                .set_ex(Self::user_key(user_id, &url.long_url), json.as_str(), ttl)
-                .await;
+            let result: RedisResult<()> = match ttl {
+                Some(ttl) => {
+                    conn.set_ex(Self::user_key(user_id, &url.long_url), json.as_str(), ttl)
+                        .await
+                }
+                None => conn.set(Self::user_key(user_id, &url.long_url), json.as_str()).await,
+            };
             if let Err(e) = result {
                 warn!("cache set failed: {}", e);
             }
         }
 
-        let result: RedisResult<()> = conn
-            .set_ex(Self::code_key(&url.short_code), json.as_str(), ttl)
-            .await;
+        let result: RedisResult<()> = match ttl {
+            Some(ttl) => {
+                conn.set_ex(Self::code_key(&url.short_code), json.as_str(), ttl)
+                    .await
+            }
+            None => conn.set(Self::code_key(&url.short_code), json.as_str()).await,
+        };
         if let Err(e) = result {
             warn!("cache set failed: {}", e);
         }
@@ -120,13 +128,17 @@ impl UrlCacheRepository {
         format!("{}:{}", URL_CODE_PREFIX, short_code)
     }
 
-    fn ttl_seconds(url: &UrlReadDto) -> Option<u64> {
-        OffsetDateTime::parse(&url.expires_at, &Rfc3339)
+    fn cache_ttl(url: &UrlReadDto) -> Option<Option<u64>> {
+        let expires_at = url.expires_at.as_deref()?;
+
+        OffsetDateTime::parse(expires_at, &Rfc3339)
             .ok()
             .map(|expires_at| {
-                (expires_at - OffsetDateTime::now_utc())
-                    .whole_seconds()
-                    .max(1) as u64
+                Some(
+                    (expires_at - OffsetDateTime::now_utc())
+                        .whole_seconds()
+                        .max(1) as u64,
+                )
             })
     }
 }

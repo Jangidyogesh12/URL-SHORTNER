@@ -62,7 +62,12 @@ pub async fn edit_url(
 ) -> Result<Json<ApiSuccessResponse<UrlReadDto>>, ApiError> {
     let url = state
         .url_service
-        .edit_url(&user, payload.short_code, payload.new_url)
+        .edit_url(
+            &user,
+            payload.short_code,
+            payload.new_url,
+            payload.expires_in_minutes,
+        )
         .await?;
     Ok(Json(ApiSuccessResponse::send(url)))
 }

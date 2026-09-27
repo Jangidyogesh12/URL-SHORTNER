@@ -1788,6 +1788,7 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "ts-rs",
+ "uuid",
 ]
 
 [[package]]
@@ -2387,6 +2388,7 @@ checksum = "756050066659291d47a554a9f558125db17428b073c5ffce1daf5dcb0f7231d8"
 dependencies = [
  "thiserror",
  "ts-rs-macros",
+ "uuid",
 ]
 
 [[package]]

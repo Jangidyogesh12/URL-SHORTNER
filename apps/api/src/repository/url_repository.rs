@@ -3,6 +3,7 @@ use crate::entity::url::Url;
 use crate::error::db_error::DbError;
 use async_trait::async_trait;
 use sqlx::Error as SqlxError;
+use sqlx::types::time::OffsetDateTime;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -21,11 +22,12 @@ pub trait UrlRepositoryTrait {
     async fn find_by_user_and_short_code(&self, user_id: Uuid, short_code: String) -> Option<Url>;
     async fn delete_by_user_and_long_url(&self, user_id: Uuid, long_url: String)
         -> Result<u64, DbError>;
-    async fn update_long_url(
+    async fn update_url(
         &self,
         user_id: Uuid,
         short_code: String,
         new_url: String,
+        expires_at: Option<OffsetDateTime>,
     ) -> Result<Option<Url>, DbError>;
 }
 
@@ -148,16 +150,17 @@ impl UrlRepositoryTrait for UrlRepository {
         Ok(result.rows_affected())
     }
 
-    async fn update_long_url(
+    async fn update_url(
         &self,
         user_id: Uuid,
         short_code: String,
         new_url: String,
+        expires_at: Option<OffsetDateTime>,
     ) -> Result<Option<Url>, DbError> {
         let url = sqlx::query_as::<_, Url>(
             r#"
         UPDATE urls
-        SET original_url = $3, updated_at = now()
+        SET original_url = $3, expires_at = $4, updated_at = now()
         WHERE user_id = $1 AND short_code = $2
         RETURNING
             id,
@@ -172,6 +175,7 @@ impl UrlRepositoryTrait for UrlRepository {
         .bind(user_id)
         .bind(short_code)
         .bind(new_url)
+        .bind(expires_at)
         .fetch_optional(self.db_conn.get_pool())
         .await
         .map_err(|e| DbError::SomethingWentWrong(e.to_string()))?;

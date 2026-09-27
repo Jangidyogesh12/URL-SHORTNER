@@ -58,6 +58,7 @@ services:
       dockerfile: apps/web/Dockerfile
     environment:
       NODE_ENV: production
+      API_URL: http://api:8080
     networks:
       - backend
     depends_on:

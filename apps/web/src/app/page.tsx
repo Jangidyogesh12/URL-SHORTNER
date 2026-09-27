@@ -1,59 +1,95 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import type { HelloResponse, User } from "shared-types";
-import { getHello, getUsers } from "@/lib/api";
+import { useCallback } from "react";
+import AuthCard from "@/components/auth-card";
+import { AuthProvider, useAuth } from "@/components/auth-provider";
+import UrlDashboard from "@/components/url-dashboard";
 
-export default function Home() {
-  const [hello, setHello] = useState<HelloResponse | null>(null);
-  const [users, setUsers] = useState<User[]>([]);
-  const [error, setError] = useState<string | null>(null);
+function AuthenticatedHome() {
+  const { initializing, logout, session } = useAuth();
+  const handleUnauthorized = useCallback(() => {
+    logout();
+  }, [logout]);
 
-  useEffect(() => {
-    getHello()
-      .then(setHello)
-      .catch((err: unknown) =>
-        setError(err instanceof Error ? err.message : "unknown error"),
-      );
-    getUsers().then(setUsers).catch(() => setUsers([]));
-  }, []);
+  if (initializing) {
+    return (
+      <p className="text-sm text-zinc-500 dark:text-zinc-400">
+        Checking your session…
+      </p>
+    );
+  }
+
+  if (!session) {
+    return (
+      <div className="flex w-full max-w-4xl flex-col items-center gap-8">
+        <div className="max-w-2xl text-center">
+          <h1 className="text-3xl font-semibold text-zinc-900 sm:text-4xl dark:text-zinc-50">
+            Short links for your long URLs
+          </h1>
+          <p className="mt-3 text-sm text-zinc-500 sm:text-base dark:text-zinc-400">
+            Create an account or sign back in to manage short links. Every link
+            keeps working at this domain as{" "}
+            <span className="font-mono">/SHORT_CODE</span>.
+          </p>
+        </div>
+
+        <AuthCard />
+
+        <dl className="grid w-full max-w-2xl grid-cols-1 gap-3 text-sm sm:grid-cols-3">
+          {[
+            ["Private by account", "Links belong to the signed-in user."],
+            ["Thirty-day links", "New links last 30 days; edits can shorten or remove expiry."],
+            ["Instant redirects", "Opening a code sends visitors onward."],
+          ].map(([title, detail]) => (
+            <div
+              key={title}
+              className="rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-800 dark:bg-zinc-950"
+            >
+              <dt className="font-semibold text-zinc-900 dark:text-zinc-50">
+                {title}
+              </dt>
+              <dd className="mt-1 text-zinc-500 dark:text-zinc-400">{detail}</dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+    );
+  }
+
+  const displayName =
+    session.user.name?.trim() || session.user.email.split("@")[0];
 
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-6 bg-zinc-50 p-8 font-sans dark:bg-black">
-      <h1 className="text-3xl font-semibold text-black dark:text-zinc-50">
-        Rust + Next.js Monorepo
-      </h1>
-
-      <section className="w-full max-w-md rounded-lg border border-black/[.08] p-6 dark:border-white/[.145]">
-        <h2 className="mb-2 text-sm font-medium uppercase tracking-wide text-zinc-500">
-          GET /api/hello
-        </h2>
-        {error && <p className="text-red-500">{error}</p>}
-        {hello && (
-          <pre className="overflow-auto text-sm text-zinc-800 dark:text-zinc-200">
-            {JSON.stringify(hello, null, 2)}
-          </pre>
-        )}
-      </section>
-
-      <section className="w-full max-w-md rounded-lg border border-black/[.08] p-6 dark:border-white/[.145]">
-        <h2 className="mb-2 text-sm font-medium uppercase tracking-wide text-zinc-500">
-          GET /api/users
-        </h2>
-        {users.length === 0 ? (
-          <p className="text-sm text-zinc-500">
-            No users yet (database not seeded).
+    <div className="flex w-full max-w-4xl flex-col items-center gap-6">
+      <header className="flex w-full flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p className="text-sm text-zinc-500 dark:text-zinc-400">
+            Signed in as {session.user.email}
           </p>
-        ) : (
-          <ul className="text-sm text-zinc-800 dark:text-zinc-200">
-            {users.map((user) => (
-              <li key={user.id}>
-                {user.id} — {user.name} ({user.email})
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+          <h1 className="text-2xl font-semibold text-zinc-900 sm:text-3xl dark:text-zinc-50">
+            Welcome, {displayName}
+          </h1>
+        </div>
+        <button
+          type="button"
+          onClick={logout}
+          className="w-fit rounded-lg border border-zinc-300 px-3 py-2 text-sm font-medium text-zinc-700 transition hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
+        >
+          Sign out
+        </button>
+      </header>
+
+      <UrlDashboard session={session} onUnauthorized={handleUnauthorized} />
     </div>
+  );
+}
+
+export default function Home() {
+  return (
+    <AuthProvider>
+      <main className="flex flex-1 items-start justify-center bg-zinc-50 px-4 py-10 font-sans sm:px-8 dark:bg-black">
+        <AuthenticatedHome />
+      </main>
+    </AuthProvider>
   );
 }

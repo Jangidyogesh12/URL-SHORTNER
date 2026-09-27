@@ -24,6 +24,10 @@ impl UserService {
             Some(_) => Err(UserError::UserAlreadyExists)?,
             None => {
                 let mut payload = payload;
+                payload.phone = payload
+                    .phone
+                    .map(|phone| phone.trim().to_owned())
+                    .filter(|phone| !phone.is_empty());
                 payload.password = bcrypt::hash(payload.password, 4).unwrap();
                 let user = self.user_repo.create(payload).await?;
                 Ok(UserReadDto::from(user))

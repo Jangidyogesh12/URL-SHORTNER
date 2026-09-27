@@ -18,7 +18,7 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "migrate", "chrono", "time", "postgres", "uuid"] }
-ts-rs = "12"
+ts-rs = { version = "12", features = ["uuid-impl"] }
 log = "0.4.29"
 dotenv = "0.15.0"
 async-trait = "0.1.89"
