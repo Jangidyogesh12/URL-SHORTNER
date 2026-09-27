@@ -1,1 +1,3 @@
-pub mod route;
+pub mod root;
+pub mod auth;
+pub mod register;

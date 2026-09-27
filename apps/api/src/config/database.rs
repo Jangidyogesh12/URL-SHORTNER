@@ -1,17 +1,16 @@
-use std::{fmt::Error, process::exit};
-
 use crate::config::parameter;
 use async_trait::async_trait;
 use log::error;
-use sqlx::{PgPool, Pool, Postgres};
+use sqlx::{Error, PgPool, Pool, Postgres};
+use std::process::exit;
 
-struct Database {
+pub struct Database {
     pool: PgPool,
 }
 
 #[async_trait]
 pub trait DatabaseTrait {
-    async fn init() -> Result<Error, Self>
+    async fn init() -> Result<Self, Error>
     where
         Self: Sized;
 

@@ -26,4 +26,5 @@ uuid = { version = "1.19.0", features = ["v4", "serde"] }
 jsonwebtoken = { version = "10.2.0", features = ["rust_crypto"] }
 time = "0.3.45"
 thiserror = "2.0.18"
-chrono = chrono = { version = "0.4.43", features = ["serde"] }
+chrono = { version = "0.4.43", features = ["serde"] }
+bcrypt = "0.18.0"
