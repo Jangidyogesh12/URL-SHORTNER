@@ -1,6 +1,7 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
+    response::Redirect,
     Extension, Json,
 };
 use crate::dto::url_dto::{UrlCreateDto, UrlEditDto, UrlQueryDto, UrlReadDto};
@@ -64,4 +65,12 @@ pub async fn edit_url(
         .edit_url(&user, payload.short_code, payload.new_url)
         .await?;
     Ok(Json(ApiSuccessResponse::send(url)))
+}
+
+pub async fn redirect(
+    State(state): State<UrlState>,
+    Path(short_code): Path<String>,
+) -> Result<Redirect, ApiError> {
+    let original_url = state.url_service.redirect(short_code).await?;
+    Ok(Redirect::temporary(&original_url))
 }

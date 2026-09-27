@@ -82,7 +82,12 @@ impl UrlRepositoryTrait for UrlRepository {
 
     async fn find_by_user_and_long_url(&self, user_id: Uuid, long_url: String) -> Option<Url> {
         let url = sqlx::query_as::<_, Url>(
-            "SELECT * FROM urls WHERE user_id = $1 AND original_url = $2",
+            r#"
+            SELECT * FROM urls
+            WHERE user_id = $1 AND original_url = $2
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
         )
         .bind(user_id)
         .bind(long_url)

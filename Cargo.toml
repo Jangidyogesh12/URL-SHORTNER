@@ -29,3 +29,4 @@ thiserror = "2.0.18"
 chrono = { version = "0.4.43", features = ["serde"] }
 bcrypt = "0.18.0"
 sha2 = "0.10"
+redis = { version = "1.7", features = ["tokio-comp", "connection-manager"] }

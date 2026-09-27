@@ -13,6 +13,8 @@ pub enum UrlError {
     ShortCodeNotFound,
     #[error("Url already exists")]
     UrlAlreadyExists,
+    #[error("Url has expired")]
+    UrlExpired,
     #[error("Failed to generate a unique short code")]
     ShortCodeGenerationFailed,
 }
@@ -23,6 +25,7 @@ impl IntoResponse for UrlError {
             UrlError::UrlNotFound => StatusCode::NOT_FOUND,
             UrlError::ShortCodeNotFound => StatusCode::NOT_FOUND,
             UrlError::UrlAlreadyExists => StatusCode::CONFLICT,
+            UrlError::UrlExpired => StatusCode::GONE,
             UrlError::ShortCodeGenerationFailed => StatusCode::INTERNAL_SERVER_ERROR,
         };
 

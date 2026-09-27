@@ -1,13 +1,16 @@
 use crate::{
-    config::database::Database,
+    config::{cache::Cache, database::Database},
     dto::url_dto::UrlReadDto,
     entity::{url::Url, user::User},
     error::{api_error::ApiError, url_error::UrlError},
-    repository::url_repository::{UrlRepository, UrlRepositoryTrait},
+    repository::{
+        url_cache_repository::{UrlCacheRepository, UrlCacheRepositoryTrait},
+        url_repository::{UrlRepository, UrlRepositoryTrait},
+    },
 };
 use sha2::{Digest, Sha256};
-use time::{Duration, OffsetDateTime};
 use std::sync::Arc;
+use time::{format_description::well_known::Rfc3339, Duration, OffsetDateTime};
 use uuid::Uuid;
 
 const SHORT_CODE_LENGTH: usize = 8;
@@ -19,12 +22,14 @@ const BASE62_ALPHABET: &[u8; 62] =
 #[derive(Clone)]
 pub struct UrlService {
     url_repo: UrlRepository,
+    url_cache: UrlCacheRepository,
 }
 
 impl UrlService {
-    pub fn new(db_conn: &Arc<Database>) -> Self {
+    pub fn new(db_conn: &Arc<Database>, cache_conn: &Arc<Cache>) -> Self {
         Self {
             url_repo: UrlRepository::new(db_conn),
+            url_cache: UrlCacheRepository::new(cache_conn),
         }
     }
 
@@ -34,11 +39,25 @@ impl UrlService {
         long_url: String,
     ) -> Result<(UrlReadDto, bool), ApiError> {
         if let Some(url) = self
+            .url_cache
+            .get_by_user_and_long_url(user.id, &long_url)
+            .await
+        {
+            if is_alive(&url) {
+                return Ok((url, false));
+            }
+        }
+
+        if let Some(url) = self
             .url_repo
             .find_by_user_and_long_url(user.id, long_url.clone())
             .await
         {
-            return Ok((url.into(), false));
+            if url.expires_at > OffsetDateTime::now_utc() {
+                let dto = UrlReadDto::from(url);
+                self.url_cache.set_url(Some(user.id), &dto).await;
+                return Ok((dto, false));
+            }
         }
 
         let short_code = self
@@ -59,17 +78,37 @@ impl UrlService {
             })
             .await?;
 
-        Ok((url.into(), true))
+        let dto = UrlReadDto::from(url);
+        self.url_cache.set_url(Some(user.id), &dto).await;
+
+        Ok((dto, true))
     }
 
     pub async fn get_url(&self, user: &User, long_url: String) -> Result<UrlReadDto, ApiError> {
+        if let Some(url) = self
+            .url_cache
+            .get_by_user_and_long_url(user.id, &long_url)
+            .await
+        {
+            if is_alive(&url) {
+                return Ok(url);
+            }
+        }
+
         let url = self
             .url_repo
             .find_by_user_and_long_url(user.id, long_url)
             .await
             .ok_or(UrlError::UrlNotFound)?;
 
-        Ok(url.into())
+        if url.expires_at <= OffsetDateTime::now_utc() {
+            return Err(UrlError::UrlExpired.into());
+        }
+
+        let dto = UrlReadDto::from(url);
+        self.url_cache.set_url(Some(user.id), &dto).await;
+
+        Ok(dto)
     }
 
     pub async fn get_urls(&self, user: &User) -> Result<Vec<UrlReadDto>, ApiError> {
@@ -78,15 +117,27 @@ impl UrlService {
     }
 
     pub async fn delete_url(&self, user: &User, long_url: String) -> Result<(), ApiError> {
+        let url = self
+            .url_repo
+            .find_by_user_and_long_url(user.id, long_url.clone())
+            .await
+            .ok_or(UrlError::UrlNotFound)?;
+
         let rows_affected = self
             .url_repo
             .delete_by_user_and_long_url(user.id, long_url)
             .await?;
 
-        match rows_affected {
-            0 => Err(UrlError::UrlNotFound.into()),
-            _ => Ok(()),
+        if rows_affected == 0 {
+            return Err(UrlError::UrlNotFound.into());
         }
+
+        self.url_cache
+            .delete_by_user_and_long_url(user.id, &url.original_url)
+            .await;
+        self.url_cache.delete_by_short_code(&url.short_code).await;
+
+        Ok(())
     }
 
     pub async fn edit_url(
@@ -95,27 +146,66 @@ impl UrlService {
         short_code: String,
         new_url: String,
     ) -> Result<UrlReadDto, ApiError> {
-        self.url_repo
+        let url = self
+            .url_repo
             .find_by_user_and_short_code(user.id, short_code.clone())
             .await
             .ok_or(UrlError::ShortCodeNotFound)?;
 
-        if self
+        if let Some(existing) = self
             .url_repo
             .find_by_user_and_long_url(user.id, new_url.clone())
             .await
-            .is_some()
         {
-            return Err(UrlError::UrlAlreadyExists.into());
+            if existing.expires_at > OffsetDateTime::now_utc() {
+                return Err(UrlError::UrlAlreadyExists.into());
+            }
         }
 
-        let url = self
+        let updated = self
             .url_repo
             .update_long_url(user.id, short_code, new_url)
             .await?
             .ok_or(UrlError::ShortCodeNotFound)?;
 
-        Ok(url.into())
+        let dto = UrlReadDto::from(updated);
+
+        self.url_cache
+            .delete_by_user_and_long_url(user.id, &url.original_url)
+            .await;
+        self.url_cache.set_url(Some(user.id), &dto).await;
+
+        Ok(dto)
+    }
+
+    pub async fn redirect(&self, short_code: String) -> Result<String, ApiError> {
+        if short_code.len() != SHORT_CODE_LENGTH {
+            return Err(UrlError::ShortCodeNotFound.into());
+        }
+
+        if let Some(url) = self.url_cache.get_by_short_code(&short_code).await {
+            if is_alive(&url) {
+                return Ok(url.long_url);
+            }
+        }
+
+        let url = self
+            .url_repo
+            .find_by_short_code(short_code)
+            .await
+            .ok_or(UrlError::ShortCodeNotFound)?;
+
+        if url.expires_at <= OffsetDateTime::now_utc() {
+            return Err(UrlError::UrlExpired.into());
+        }
+
+        let user_id = url.user_id;
+        let original_url = url.original_url.clone();
+        let dto = UrlReadDto::from(url);
+
+        self.url_cache.set_url(user_id, &dto).await;
+
+        Ok(original_url)
     }
 
     async fn generate_unique_short_code(
@@ -142,6 +232,12 @@ impl UrlService {
 
         Err(UrlError::ShortCodeGenerationFailed.into())
     }
+}
+
+fn is_alive(url: &UrlReadDto) -> bool {
+    OffsetDateTime::parse(&url.expires_at, &Rfc3339)
+        .map(|expires_at| expires_at > OffsetDateTime::now_utc())
+        .unwrap_or(false)
 }
 
 fn generate_short_code(user_id: &Uuid, long_url: &str, salt: Option<&str>) -> String {

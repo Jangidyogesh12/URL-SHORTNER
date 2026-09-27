@@ -15,6 +15,7 @@ use log::{error, info};
 use tokio::net::TcpListener;
 
 use crate::config::{
+    cache::{Cache, CacheTrait},
     database::{Database, DatabaseTrait},
     parameter,
 };
@@ -36,6 +37,13 @@ async fn main() {
 
     info!("Database Connected");
 
+    let cache_conn = Cache::init().await.unwrap_or_else(|e| {
+        error!("Failed to initialize the cache : {}", e);
+        exit(1);
+    });
+
+    info!("Redis Cache Connected");
+
     let app_url = parameter::get("APP_URL").unwrap_or_else(|e| {
         error!("{}", e);
         exit(1);
@@ -53,7 +61,7 @@ async fn main() {
         exit(1);
     });
 
-    let app = routes::root::routes(Arc::new(db_conn));
+    let app = routes::root::routes(Arc::new(db_conn), Arc::new(cache_conn));
 
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
