@@ -30,19 +30,15 @@ impl UserRepositoryTrait for UserRepository {
             r#"
         INSERT INTO users (
             id,
-            first_name,
-            last_name,
-            username,
+            name,
             email,
             phone,
             password
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING
             id,
-            first_name,
-            last_name,
-            username,
+            name,
             email,
             phone,
             password,
@@ -60,7 +56,7 @@ impl UserRepositoryTrait for UserRepository {
         .await
         .map_err(|e| match e {
             SqlxError::Database(e) => match e.code() {
-                Some(code) if code == "23000" => DbError::UniqueConstraintViolation(e.to_string()),
+                Some(code) if code == "23505" => DbError::UniqueConstraintViolation(e.to_string()),
                 _ => DbError::SomethingWentWrong(e.to_string()),
             },
             _ => DbError::SomethingWentWrong(e.to_string()),

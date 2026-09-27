@@ -22,7 +22,7 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/api /usr/local/bin/api
 
-ENV API_PORT=8080
+ENV APP_PORT=8080
 EXPOSE 8080
 
 CMD ["api"]

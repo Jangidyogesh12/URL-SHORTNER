@@ -13,7 +13,7 @@ pub struct UserLoginDto {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct UserRegisterDto {
-    pub name: Uuid,
+    pub name: String,
     pub email: String,
     pub phone: String,
     pub password: String,
@@ -28,7 +28,6 @@ pub struct UserReadDto {
     pub is_active: bool,
     pub created_at: String,
     pub updated_at: String,
-    pub expires_at: String,
 }
 
 impl From<User> for UserReadDto {
@@ -44,10 +43,6 @@ impl From<User> for UserReadDto {
                 "".to_string()
             }),
             updated_at: model.updated_at.format(&Rfc3339).unwrap_or_else(|e| {
-                error!("Failed to format updated_at (user_id={}): {}", model.id, e);
-                "".to_string()
-            }),
-            expires_at: model.expires_at.format(&Rfc3339).unwrap_or_else(|e| {
                 error!("Failed to format updated_at (user_id={}): {}", model.id, e);
                 "".to_string()
             }),

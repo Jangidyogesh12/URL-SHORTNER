@@ -9,8 +9,8 @@ pub fn init() -> Result<(), String> {
             Ok(())
         }
         Err(e) => {
-            error!("Failed to load .env file: {}", e);
-            Err(e.to_string())
+            info!(".env file not found, relying on environment variables: {}", e);
+            Ok(())
         }
     }
 }

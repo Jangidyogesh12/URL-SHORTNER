@@ -11,5 +11,4 @@ pub struct User {
     pub is_active: bool,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
-    pub expires_at: OffsetDateTime,
 }

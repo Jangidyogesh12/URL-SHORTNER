@@ -28,3 +28,4 @@ time = "0.3.45"
 thiserror = "2.0.18"
 chrono = { version = "0.4.43", features = ["serde"] }
 bcrypt = "0.18.0"
+sha2 = "0.10"
