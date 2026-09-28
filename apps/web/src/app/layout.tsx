@@ -15,6 +15,9 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Link Shortener",
   description: "Create, manage, and share short links that redirect to long URLs.",
+  icons: {
+    icon: [{ url: "/icon.svg", type: "image/svg+xml" }],
+  },
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
