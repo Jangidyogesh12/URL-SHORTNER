@@ -1,7 +1,7 @@
 use crate::config::cache::{Cache, CacheTrait};
 use crate::dto::url_dto::UrlReadDto;
 use async_trait::async_trait;
-use log::warn;
+use tracing::warn;
 use redis::{AsyncCommands, RedisResult};
 use std::sync::Arc;
 use time::format_description::well_known::Rfc3339;

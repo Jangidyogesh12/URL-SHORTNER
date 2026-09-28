@@ -1,5 +1,5 @@
 pub use shared::{UrlCreateDto, UrlEditDto, UrlQueryDto, UrlReadDto};
-use log::error;
+use tracing::error;
 use time::format_description::well_known::Rfc3339;
 
 use crate::entity::url::Url;

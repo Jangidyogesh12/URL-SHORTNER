@@ -33,7 +33,7 @@ services:
       timeout: 5s
       retries: 10
 
-  api:
+  api1:
     build:
       context: .
       dockerfile: apps/api/Dockerfile
@@ -45,7 +45,51 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       RUST_LOG: info
     networks:
-      - backend
+      backend:
+        aliases:
+          - api
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  api2:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-postgres}
+      REDIS_URL: redis://redis:6379/
+      APP_URL: 0.0.0.0
+      APP_PORT: 8080
+      JWT_SECRET: ${JWT_SECRET}
+      RUST_LOG: info
+    networks:
+      backend:
+        aliases:
+          - api
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  api3:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-postgres}
+      REDIS_URL: redis://redis:6379/
+      APP_URL: 0.0.0.0
+      APP_PORT: 8080
+      JWT_SECRET: ${JWT_SECRET}
+      RUST_LOG: info
+    networks:
+      backend:
+        aliases:
+          - api
     depends_on:
       db:
         condition: service_healthy
@@ -60,9 +104,12 @@ services:
       NODE_ENV: production
       API_URL: http://api:8080
     networks:
+      - frontend
       - backend
     depends_on:
-      - api
+      - api1
+      - api2
+      - api3
 
   nginx:
     image: nginx:latest
@@ -75,7 +122,9 @@ services:
       - backend
     depends_on:
       - web
-      - api
+      - api1
+      - api2
+      - api3
 
 volumes:
   db_data:

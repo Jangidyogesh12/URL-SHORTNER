@@ -1,6 +1,6 @@
 use crate::config::parameter;
 use async_trait::async_trait;
-use log::error;
+use tracing::error;
 use redis::aio::ConnectionManager;
 use redis::{Client, RedisError};
 use std::process::exit;

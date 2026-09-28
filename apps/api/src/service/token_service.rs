@@ -4,7 +4,7 @@ use crate::entity::user::User;
 use crate::error::token_error::TokenError;
 use chrono;
 use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, TokenData, Validation};
-use log::error;
+use tracing::error;
 use std::process::exit;
 
 #[derive(Clone)]

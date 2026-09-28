@@ -1,5 +1,5 @@
 use dotenv::dotenv;
-use log::{error, info};
+use tracing::{error, info};
 use std::env;
 
 pub fn init() -> Result<(), String> {

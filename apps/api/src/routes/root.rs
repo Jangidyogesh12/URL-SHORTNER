@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use axum::{routing::get, Router};
-use tower_http::trace::TraceLayer;
+use tower_http::trace::{DefaultMakeSpan, DefaultOnRequest, DefaultOnResponse, TraceLayer};
+use tracing::Level;
 
 use crate::{
     config::{cache::Cache, database::Database},
@@ -33,7 +34,12 @@ pub fn routes(db_conn: Arc<Database>, cache_conn: Arc<Cache>) -> Router {
     let app_router = Router::new()
         .nest("/api", merged_router)
         .merge(redirect_router)
-        .layer(TraceLayer::new_for_http());
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(DefaultMakeSpan::new().level(Level::INFO))
+                .on_request(DefaultOnRequest::new().level(Level::INFO))
+                .on_response(DefaultOnResponse::new().level(Level::INFO)),
+        );
 
     app_router
 }

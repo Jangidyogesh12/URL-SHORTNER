@@ -11,7 +11,7 @@ mod state;
 use std::{process::exit, sync::Arc};
 use tokio::signal;
 
-use log::{error, info};
+use tracing::{error, info};
 use tokio::net::TcpListener;
 
 use crate::config::{
@@ -23,6 +23,13 @@ mod utils;
 
 #[tokio::main]
 async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     if let Err(e) = parameter::init() {
         error!("Parameter init failed: {}", e);
         exit(1);

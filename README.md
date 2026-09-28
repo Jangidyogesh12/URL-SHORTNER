@@ -1,6 +1,8 @@
 # Link Shortener
 
-A full-stack, per-user URL shortener built with a **Next.js** frontend and a **Rust (Axum)** backend. It uses **PostgreSQL** as the authoritative store, **Redis** as a short-URL cache, **Nginx** as a single-origin reverse proxy, and shared Rust-generated TypeScript contracts.
+A full-stack, per-user URL shortener built with a **Next.js** frontend and a **Rust (Axum)** backend. It uses **PostgreSQL** as the authoritative store, **Redis** as a short-URL cache, **Nginx** as a single-origin reverse proxy and load balancer, and shared Rust-generated TypeScript contracts.
+
+The API runs as three replicas (`api1`, `api2`, `api3`) behind Nginx round-robin load balancing for local load-distribution testing.
 
 Authenticated users can:
 
@@ -25,7 +27,6 @@ Both package managers live side by side in one repo:
    browser ──────────────▶│  /                  -> web:3000        │
                           │  /api/*             -> api:8080        │
                           │  /<8-char-code>     -> web:3000        │
-                          │  /health            -> api:8080/health*│
                           └───────────────────┬────────────────────┘
                                               │ backend network
                           ┌───────────────────┴────────────────────┐

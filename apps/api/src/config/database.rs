@@ -1,6 +1,6 @@
 use crate::config::parameter;
 use async_trait::async_trait;
-use log::error;
+use tracing::error;
 use sqlx::{Error, PgPool, Pool, Postgres};
 use std::process::exit;
 
