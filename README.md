@@ -1,122 +1,155 @@
-# Link Shortener
+# URL Shortener — Rust + Next.js Monorepo
 
-A full-stack, per-user URL shortener built with a **Next.js** frontend and a **Rust (Axum)** backend. It uses **PostgreSQL** as the authoritative store, **Redis** as a short-URL cache, **Nginx** as a single-origin reverse proxy and load balancer, and shared Rust-generated TypeScript contracts.
+> This is the **Rust + Next.js monorepo** implementation of the blog
+> **["A URL Shortener Is Easy, Until You Scale It"](https://www.yogesharma.in/writing/url-shortener)**.
+>
+> Read it side-by-side with the blog: the blog reasons from constraints to
+> architecture, this repo shows how those ideas translate into running code.
 
-The API runs as three replicas (`api1`, `api2`, `api3`) behind Nginx round-robin load balancing for local load-distribution testing.
+If you have read the blog, you already know the story:
 
-Authenticated users can:
+`naive design → reverse proxy → cache → key generation → expiry`.
+This repo implements exactly that path — no more, no less.
 
-- Register and sign in.
-- Create short links for long URLs.
-- Browse, search, filter, edit, delete, copy, and open their links.
-- Give each edited link a fixed lifetime—or leave it without expiry.
-- Share public links in the form `/{short_code}`.
+---
 
-Both package managers live side by side in one repo:
+## What is implemented here
 
-- **npm workspaces** manage the JavaScript/TypeScript side (`apps/web`, `packages/*`).
-- **Cargo workspace** manages the Rust side (`apps/api`, `crates/*`).
+| Blog idea | What this repo does |
+| --- | --- |
+| **Reverse proxy / API gateway** | `nginx` is the single entrypoint. `:80` redirects to HTTPS, `:443` (Cloudflare Origin certs) routes `/api/*` to the Rust API, `/{8-char-code}` + `/` to Next.js. |
+| **Horizontally scaled API** | 3 identical Axum replicas (`api1`, `api2`, `api3`) behind nginx round-robin (`api_upstream`). |
+| **Cache in front of the DB** | Redis cache-aside. Reads check Redis first, miss falls through to Postgres and repopulates Redis. Redis failures log and fall back to Postgres. |
+| **Write-through / invalidate on write** | Create warms both cache keys. Edit refreshes both keys (deletes the old `user → url` key). Delete removes both keys. |
+| **Short-key generation** | `SHA256(user_id \| long_url [\| salt])` → Base62 (8 chars). Up to 5 attempts with a random salt on global `short_code` collision. Per-user: same user + same URL returns the existing active row (`200`), otherwise creates (`201`). |
+| **Expiry with TTL** | `urls.expires_at` is source of truth. New links default to **30 days**. Edits accept only `30`, `120`, `10080`, `525600` minutes or `null` (never expires). Redis `SETEX` TTL = remaining lifetime; `null` expiry = persistent key. Expired rows return `410`; Next.js shows `/expired`. |
+| **Public redirect** | `GET /{short_code}` → `307` + `Location`. Unknown / malformed → `404` (Next.js shows `/missing`). No auth required. |
+| **User-scoped CRUD** | Register / login (JWT, 30 min, bcrypt passwords), then `create / get / list / edit / delete` — all scoped to the logged-in user. |
+| **Single-origin frontend** | Next.js serves UI, dashboard, and the short-code fallback proxy (`src/proxy.ts`). Browser only talks to nginx, so no CORS. |
+| **Typed contracts** | Rust DTOs in `crates/shared` are the source of truth; `ts-rs` generates `packages/shared-types/src/generated/*.ts`. |
+
+> Scope note: this repo runs **one Postgres primary** (no read replicas, no sharding, no background expiry sweeper). Expiry is enforced lazily on read plus Redis TTL.
 
 ---
 
 ## Architecture
 
 ```text
-                          ┌────────────────────────────────────────┐
-           port 80        │                  nginx                 │
-   browser ──────────────▶│  /                  -> web:3000        │
-                          │  /api/*             -> api:8080        │
-                          │  /<8-char-code>     -> web:3000        │
-                          └───────────────────┬────────────────────┘
-                                              │ backend network
-                          ┌───────────────────┴────────────────────┐
-                          │                                        │
-                     ┌────▼────┐                              ┌────▼────┐
-                     │   web   │                              │   api   │
-                     │ Next.js │                              │  Axum   │
-                     │  :3000  │                              │  :8080  │
-                     └────┬────┘                              └───┬─────┘ 
-                          │ fallback redirect lookups             │
-                          └──────────────────────────────────────▶│
-                                                                  │
-                     ┌────────────────────────────────────────────▼───────┐
-                     │                          db                        │
-                     │                       Postgres                     │
-                     │                         :5432                      │
-                     └────────────────────────────────────────────────────┘
-
-                     ┌─────────────────────────────────────────┐
-                     │                 redis                   │
-                     │           short-URL cache               │
-                     │                 :6379                   │
-                     └─────────────────────────────────────────┘
+                        ┌─────────────────────────────────────────────┐
+                        │                    nginx                    │
+                        │  :80  → 301 https://$host$request_uri       │
+                        │  :443 ssl (Cloudflare Origin certs)         │
+ browser ──────────────▶│    /api/*          → api_upstream (1/2/3)   │
+         single origin  │    /XXXXXXXX (8×B62)→ web:3000              │
+                        │    /                 → web:3000             │
+                        └──────┬────────────────────────┬─────────────┘
+                               │                        │
+                  ┌────────────▼───────┐   ┌────────────▼────────────┐
+                  │        web         │   │      api × 3            │
+                  │      Next.js       │   │   Rust (Axum) :8080     │
+                  │       :3000        │──▶│  auth + CRUD + redirect │
+                  └────────────────────┘   └────────────┬────────────┘
+                        short-code                       │
+                        fallback                         ▼
+                        proxy               ┌─────────────────────────┐
+                                            │   Postgres :5432        │
+                                            │   authoritative store   │
+                                            └─────────────────────────┘
+                                            ┌─────────────────────────┐
+                                            │   Redis :6379           │
+                                            │   ephemeral short-URL   │
+                                            │   cache (no volume)     │
+                                            └─────────────────────────┘
 ```
 
-Only Nginx port `80` is exposed for application traffic. Postgres and Redis are also published to the host so local tools, Cargo commands, and migration commands can reach them. Because Nginx serves the UI, API, and short links from one origin, the browser does not make cross-origin requests.
-
-\* Nginx still forwards `/health`, but the current API does not implement a health endpoint.
-
----
-
-## What each component does
-
-| Path | Component | Responsibility |
-| --- | --- | --- |
-| `apps/web` | **Next.js frontend** | Authentication UI, URL dashboard, typed API client, JWT session handling, short-code redirect fallback, and missing/expired-link pages. |
-| `apps/api` | **Rust API (Axum)** | Registration, authentication, user-scoped URL management, public redirects, JWT middleware, Postgres access, and Redis caching. |
-| `crates/shared` | **Rust shared library** | Canonical request/response DTOs. Derives `serde` for JSON and `ts-rs` for TypeScript, and hosts the export binary. API DTO modules re-export these types. |
-| `packages/shared-types` | **TypeScript package** | Generated DTO bindings plus a manually maintained success/error envelope matching the backend response shape. |
-| `apps/api/migrations` | **Database migrations** | Versioned sqlx migrations owning the Postgres schema. |
-| `nginx.conf` | **Reverse proxy** | Routes `/` to Next.js, `/api/*` to Rust, and eight-character short codes to Next.js so expired and missing links can show friendly pages. |
-| `docker-compose.yaml` | **Orchestration** | Wires `nginx`, `web`, `api`, `db`, and `redis` together with networks, ports, environment variables, health checks, and volumes. |
-| `Cargo.toml` | **Cargo workspace root** | Declares Rust members (`apps/api`, `crates/shared`) and shared dependency versions. |
-| `package.json` | **npm workspace root** | Declares JS members (`apps/web`, `packages/*`) and top-level convenience scripts. |
+Only nginx ports `80`/`443` are application traffic. Postgres (`5432`) and
+Redis (`6379`) are also published so local `cargo` / `sqlx` / GUI tools can
+reach them.
 
 ---
 
-## Shared types pipeline
+## How it works (blog → code)
 
-Rust DTOs are the source of truth. Generated DTO bindings are checked in so Docker and frontend builds do not need to run Rust first.
+### 1. Gateway routing (`nginx.conf`)
+
+- `location /api/` → `http://api_upstream` (`api1:8080`, `api2:8080`, `api3:8080`, round-robin).
+- `location ~ "^/[0-9A-Za-z]{8}$"` → `web:3000` so unknown/expired codes render friendly pages instead of raw JSON.
+- `location /` → `web:3000`.
+- `:80` unconditionally returns `301 https://...`; `:443` serves TLS with `./certs/fullchain.pem` + `./certs/privkey.pem` (Cloudflare Origin certs for Full-Strict).
+
+### 2. Short-code generation (`apps/api/src/service/url_service.rs`)
 
 ```text
-crates/shared/src/lib.rs          canonical DTOs
-        │
-        │  npm run generate-types   (cargo run -p shared --bin export)
+digest = SHA256("{user_id}|{long_url}[|{random_salt}]")
+code   = first 8 chars of digest bytes mapped through Base62
+         "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+```
+
+- Codes are **per-user**: different users get different codes for the same long URL.
+- Global uniqueness enforced by `urls.short_code UNIQUE` + a pre-insert lookup; on collision a fresh `Uuid` salt is tried (max 5 attempts).
+- Same user re-shortening an **active** URL gets the existing row back (`200`); only genuinely new rows return `201`.
+
+### 3. Redis cache (`apps/api/src/repository/url_cache_repository.rs`)
+
+Postgres is authoritative. Each URL is cached as JSON under **two keys**:
+
+```text
+url:user:{user_id}:{long_url}
+url:code:{short_code}
+```
+
+- Read path: `cache → Postgres → repopulate cache`.
+- `GET /api/urls` (full listing) always hits Postgres.
+- TTL = `expires_at - now` (min 1s); `expires_at = NULL` = persistent key.
+- Expired / malformed cache entries are treated as misses.
+- Any Redis error is logged (`warn!`) and the request continues against Postgres.
+
+### 4. Expiry & redirects
+
+Direct API (`GET /{short_code}`):
+
+| State | Response |
+| --- | --- |
+| Valid | `307 Temporary Redirect` + `Location: <original_url>` |
+| Unknown / malformed (not 8 chars) | `404` |
+| Expired (`expires_at <= now`) | `410` |
+
+Production (through nginx → Next.js `src/proxy.ts`):
+
+| State | Browser sees |
+| --- | --- |
+| Valid | Redirected to the original site (`307`) |
+| Unknown | `/missing` page |
+| Expired | `/expired` page |
+
+Create defaults to `expires_at = now + 30 days`. Only edits can change the
+lifetime, and only to `30 / 120 / 10080 / 525600` minutes or `null`.
+
+### 5. Auth (JWT, 30 minutes)
+
+1. `POST /api/register` → creates user (bcrypt-hashed password), frontend immediately logs in.
+2. `POST /api/auth` → returns `{ token, iat, exp }` (`exp = iat + 30 min`).
+3. Frontend stores the token in `localStorage`, attaches `Authorization: Bearer <token>`, auto-signs-out on expiry / `401`.
+4. Axum middleware validates the JWT and loads the `User` for every `/api/url*` route.
+
+### 6. Shared types pipeline
+
+Rust is the source of truth — generated files are checked in so Docker / Vercel-style builds never need Cargo first:
+
+```text
+crates/shared/src/lib.rs        canonical DTOs (serde + ts-rs)
+        │  npm run generate-types  (cargo run -p shared --bin export)
         ▼
 packages/shared-types/src/generated/*.ts
-        │
-        │  plus manually maintained response envelope in
-        │  packages/shared-types/src/api.ts
+        │  + hand-maintained envelope in packages/shared-types/src/api.ts
+        │    { data: T } on success / { message, code } on error
         ▼
-apps/web  ─────────────────────────────────────▶  apps/api
+apps/web  ◀── typed fetch client (src/lib/api.ts) ──▶  apps/api
 ```
 
-DTO examples include:
-
-- `UserLoginDto`
-- `UserRegisterDto`
-- `UserReadDto`
-- `TokenReadDto`
-- `TokenClaimsDto`
-- `UrlCreateDto`
-- `UrlQueryDto`
-- `UrlEditDto`
-- `UrlReadDto`
-
-The frontend also imports:
-
-```ts
-interface ApiSuccessResponse<T> {
-  data: T;
-}
-
-interface ApiErrorResponse {
-  message: string | null;
-  code: number;
-}
-```
-
-`i64` fields are exported as TypeScript `number`, UUIDs as `string`, and Rust `Option<T>` as `T | null`. After changing any DTO in `crates/shared`, re-run `npm run generate-types`.
+DTOs: `UserLoginDto`, `UserRegisterDto`, `UserReadDto`, `TokenReadDto`,
+`TokenClaimsDto`, `UrlCreateDto`, `UrlQueryDto`, `UrlEditDto`, `UrlReadDto`.
+`i64` → `number`, `Uuid` → `string`, `Option<T>` → `T | null`.
 
 ---
 
@@ -125,39 +158,67 @@ interface ApiErrorResponse {
 ```text
 .
 ├── apps/
-│   ├── api/                    # Rust Axum backend
-│   │   ├── src/main.rs         # server bootstrap and shutdown
-│   │   ├── src/routes/         # auth, registration, URL, redirect, and root routes
-│   │   ├── src/handler/        # request handlers
-│   │   ├── src/service/        # token, user, and URL business logic
-│   │   ├── src/repository/     # Postgres and Redis access
-│   │   ├── src/state/          # route state and dependency wiring
-│   │   ├── src/middleware/     # JWT authentication middleware
-│   │   ├── src/entity/         # database row models
-│   │   ├── src/dto/            # re-exports of canonical shared DTOs
-│   │   ├── src/config/         # parameters, Postgres, and Redis setup
-│   │   ├── src/utils/          # success/error response helpers
-│   │   ├── migrations/         # sqlx migrations (schema source of truth)
-│   │   ├── Cargo.toml
+│   ├── api/                  # Rust Axum backend (:8080)
+│   │   ├── src/main.rs       # bootstrap, tracing, graceful shutdown
+│   │   ├── src/routes/       # /api/* + /{short_code} wiring
+│   │   ├── src/handler/      # thin HTTP adapters
+│   │   ├── src/service/      # token / user / url business logic
+│   │   ├── src/repository/   # Postgres + Redis access
+│   │   ├── src/middleware/   # JWT auth
+│   │   ├── src/entity/       # DB row models
+│   │   ├── src/dto/          # re-exports of crates/shared
+│   │   ├── src/config/       # env, Postgres pool, Redis manager
+│   │   ├── src/utils/        # { data } / { message, code } helpers
+│   │   ├── src/state/        # dependency wiring
+│   │   ├── migrations/       # sqlx schema (source of truth)
 │   │   └── Dockerfile
-│   └── web/                    # Next.js frontend
-│       ├── src/app/            # home, not-found, missing-link, and expired-link pages
-│       ├── src/components/     # auth and URL-dashboard UI
-│       ├── src/lib/            # typed API client and session handling
-│       ├── src/proxy.ts        # short-code redirect fallback
-│       ├── next.config.ts      # standalone output, rewrites, shared-types
-│       ├── package.json
-│       └── Dockerfile
-├── crates/
-│   └── shared/                 # DTOs + ts-rs export binary
-├── packages/
-│   └── shared-types/           # generated DTOs plus response-envelope types
-├── nginx.conf                  # reverse-proxy config
-├── docker-compose.yaml         # service orchestration
-├── Cargo.toml                  # Cargo workspace root
-├── package.json                # npm workspace root
-└── .env                        # local environment variables
+│   └── web/                  # Next.js frontend (:3000)
+│       ├── src/app/          # home, /missing, /expired, not-found
+│       ├── src/components/   # auth-card, auth-provider, url-dashboard
+│       ├── src/lib/          # typed api.ts client + session.ts
+│       ├── src/proxy.ts      # short-code fallback (410→/expired, 404→/missing)
+│       └── Dockerfile        # standalone output
+├── crates/shared/            # canonical DTOs + export binary
+├── packages/shared-types/    # generated TS + ApiSuccess/Error envelope
+├── nginx.conf                # gateway / TLS / upstream routing
+├── docker-compose.yaml       # db, redis, api1-3, web, nginx
+├── do.sh                     # prod-style run (prebuilt tarballs + certs check)
+├── Cargo.toml                # Cargo workspace (apps/api, crates/shared)
+└── package.json              # npm workspaces (apps/web, packages/*)
 ```
+
+Both package managers live side by side: **npm workspaces** for TS,
+**Cargo workspace** for Rust.
+
+---
+
+## API endpoints
+
+Success envelope: `{ "data": ... }` · Error envelope: `{ "message": "...", "code": N }`
+
+| Method | Path | Auth | Description |
+| --- | --- | --- | --- |
+| `POST` | `/api/register` | No | Create user → `UserReadDto`. `phone` optional / `null`. |
+| `POST` | `/api/auth` | No | Email + password → `TokenReadDto` (30-min JWT). |
+| `GET` | `/api/urls` | Yes | Own URLs, newest first (always from Postgres). |
+| `GET` | `/api/url?long_url=...` | Yes | Own newest mapping for one long URL. |
+| `POST` | `/api/create_url` | Yes | `{ long_url }` → `201` new / `200` existing active. Default expiry 30 days. |
+| `PUT` | `/api/edit_url` | Yes | `{ short_code, new_url, expires_in_minutes }`. See lifetimes below. |
+| `DELETE` | `/api/delete_url?long_url=...` | Yes | Delete own mapping → `204`. Clears both cache keys. |
+| `GET` | `/{short_code}` | No | Public redirect (`307` / `404` / `410`). |
+
+Edit lifetimes (`expires_in_minutes`):
+
+| UI selection | Value | Meaning |
+| --- | --- | --- |
+| 30 minutes | `30` | `now + 30 min` |
+| 2 hours | `120` | `now + 2 h` |
+| 1 week | `10080` | `now + 7 d` |
+| 1 year | `525600` | `now + 365 d` |
+| No expiry | `null` | `expires_at = NULL`, never expires |
+
+Any other number → `400 Invalid link lifetime`. Pointing `new_url` at a
+different live row you own → `409`.
 
 ---
 
@@ -167,6 +228,7 @@ interface ApiErrorResponse {
 - Rust (stable) + Cargo
 - `sqlx-cli` (`cargo install sqlx-cli --no-default-features --features postgres,rustls`)
 - Docker + Docker Compose
+- Copy `.env.example` → `.env` and set a real `JWT_SECRET`
 
 ---
 
@@ -176,34 +238,25 @@ interface ApiErrorResponse {
 
 ```bash
 npm run docker:up      # docker compose up --build
-npm run migrate:info   # inspect applied and pending migrations
-npm run migrate:up     # apply pending migrations
+npm run migrate:info   # check pending migrations
+npm run migrate:up     # apply schema (NOT automatic on boot)
 ```
 
-Then open:
+Open `http://localhost/` (nginx → web / api). Stop with `npm run docker:down`.
 
-- `http://localhost/` — Next.js app
-- `http://localhost/api/auth` — login API
-- `http://localhost/api/register` — registration API
-- `http://localhost/AbC123Xy` — example short-link route
-
-Stop with `npm run docker:down`.
-
-Targeted code changes do **not** require rebuilding every service. For example:
+Targeted rebuilds (source edits need a rebuild of the affected image):
 
 ```bash
-docker compose up -d --build api web
+docker compose up -d --build api1 api2 api3 web   # api/web changes
+docker compose restart nginx                      # nginx.conf changes
 ```
-
-Plain `docker compose up -d` reuses the existing images, so source edits will not appear until the affected images are rebuilt. Restart Nginx after changing `nginx.conf`.
 
 ### Option B — Local development
 
-Run Postgres and Redis through Docker, then run each app locally:
-
 ```bash
-# terminal 1 — Postgres and Redis
+# terminal 1 — infra only
 docker compose up -d db redis
+npm run migrate:up
 
 # terminal 2 — Rust API (http://localhost:8080)
 npm run dev:api
@@ -212,12 +265,16 @@ npm run dev:api
 npm run dev:web
 ```
 
-In local development:
+Locally, Next.js rewrites `/api/*` and the short-code proxy to
+`http://localhost:8080`. In Compose, the web container uses `API_URL=http://api:8080`
+(Docker DNS alias shared by `api1/2/3`).
 
-- Next.js rewrites `/api/*` to `http://localhost:8080`.
-- The Next.js short-code proxy also defaults to `http://localhost:8080`.
-- The production web container instead uses `API_URL=http://api:8080`.
-- Copy `.env.example` to `.env` and set a real `JWT_SECRET` before running locally.
+### Production-style (`do.sh`)
+
+`./do.sh --run` loads prebuilt `api.tar.gz` / `web.tar.gz`, requires
+`certs/fullchain.pem` + `certs/privkey.pem` (Cloudflare Origin certs for
+`yogesharma.space`), then starts `db → redis → api1/2/3 → web → nginx`.
+`./do.sh --stop | --status | --logs [svc]` manages the stack.
 
 ---
 
@@ -225,191 +282,50 @@ In local development:
 
 | Command | Description |
 | --- | --- |
-| `npm run dev:web` | Start the Next.js dev server |
-| `npm run dev:api` | Run the Rust API with Cargo |
-| `npm run types` | Alias for regenerating shared TypeScript types |
-| `npm run generate-types` | Regenerate TypeScript types from Rust DTOs |
-| `npm run migrate:up` | Apply all pending sqlx migrations |
-| `npm run migrate:down` | Revert the most recent migration |
-| `npm run migrate:info` | List applied / pending migrations |
-| `npm run migrate:add -- <name>` | Create a new reversible migration |
-| `npm run db:reset` | Wipe the database to zero via raw `psql` (drops the `public` schema) |
-| `npm run build` | Generate types, then build web and api |
+| `npm run dev:web` / `npm run dev:api` | Dev servers |
+| `npm run generate-types` (`npm run types`) | Regenerate TS from Rust DTOs (run after any DTO change) |
+| `npm run build` | Types → web build → api release build |
 | `npm run check` | `cargo check --workspace` |
-| `npm run docker:up` | Build and start the full stack |
-| `npm run docker:down` | Stop the stack |
-
-Individual workspaces can be targeted too, e.g. `npm run build --workspace=web`.
-
----
-
-## Migrations
-
-The Postgres schema is owned by the Rust API and versioned with **sqlx migrations** in `apps/api/migrations/`. Each migration is a reversible pair (`*.up.sql` / `*.down.sql`), tracked in the `_sqlx_migrations` table.
-
-```bash
-npm run migrate:info            # list applied / pending migrations
-npm run migrate:up              # apply all pending migrations
-npm run migrate:down            # revert the most recent migration
-npm run migrate:add -- <name>   # create a new reversible migration
-```
-
-Migrations are **not** applied automatically when the API starts—run them explicitly with `npm run migrate:up`.
-
-Current schema behavior:
-
-- `users` has unique names, emails, and phone numbers.
-- Registration phone numbers are optional and stored as `NULL` when omitted.
-- `urls.short_code` is globally unique.
-- `urls.user_id` is optional and set to `NULL` when its owning user is deleted.
-- `urls.expires_at` is nullable; `NULL` means the short link never expires.
-- New links default to a 30-day expiry.
-- Do not edit an already-applied migration; create a new migration instead. Editing applied files can cause checksum mismatches.
-
-To reset the database back to zero, use the raw-Postgres reset instead of reverting migrations. It drops and recreates the `public` schema, removing all tables and data (including `_sqlx_migrations`):
-
-```bash
-npm run db:reset
-```
+| `npm run migrate:info / migrate:up / migrate:down` | Inspect / apply / revert sqlx migrations |
+| `npm run migrate:add -- <name>` | New reversible migration pair |
+| `npm run db:reset` | Drop + recreate `public` schema (wipes everything incl. `_sqlx_migrations`) |
+| `npm run docker:up` / `npm run docker:down` | Full-stack up / down |
 
 ---
 
-## Authentication and sessions
+## Migrations & schema
 
-1. The frontend offers sign-in and registration tabs.
-2. Registration returns the new user profile, after which the frontend immediately signs that user in.
-3. Login returns a JWT valid for 30 minutes.
-4. Protected API routes require:
-   ```text
-   Authorization: Bearer <token>
-   ```
-5. Backend JWT middleware validates the token and loads the corresponding user.
-6. The frontend stores the token in browser local storage, derives identity and expiry from its claims, signs out automatically when it expires, and returns to authentication after a `401`.
+Schema is owned by `apps/api/migrations/` (reversible `*.up.sql` / `*.down.sql`,
+tracked in `_sqlx_migrations`, never auto-applied):
+
+- `users`: unique `name`, `email`, `phone` (nullable); bcrypt password hash.
+- `urls`: `id` (uuid PK), `user_id` nullable (`ON DELETE SET NULL`), `original_url` text, `short_code varchar(8)` globally unique + indexed, `created_at / updated_at`, `expires_at` nullable (`NULL` = never expires).
+
+> Never edit an applied migration — add a new one. Editing causes sqlx checksum mismatches.
 
 ---
 
-## API endpoints
+## Environment variables (`.env` ⊇ `.env.example`)
 
-All successful JSON responses use:
-
-```json
-{
-  "data": {}
-}
-```
-
-API errors use:
-
-```json
-{
-  "message": "Url not found",
-  "code": 404
-}
-```
-
-| Method | Path | Authentication | Description |
-| --- | --- | --- | --- |
-| `POST` | `/api/register` | No | Creates a user and returns `UserReadDto`. Phone may be omitted or `null`. |
-| `POST` | `/api/auth` | No | Accepts email/password and returns `TokenReadDto`. |
-| `GET` | `/api/urls` | Yes | Returns the authenticated user’s URLs, newest first. |
-| `GET` | `/api/url?long_url=...` | Yes | Returns the authenticated user’s newest mapping for one long URL. |
-| `POST` | `/api/create_url` | Yes | Creates a short URL. Returns `201` for a new mapping or `200` with the existing active mapping. |
-| `PUT` | `/api/edit_url` | Yes | Changes the destination and lifetime owned by one short code. |
-| `DELETE` | `/api/delete_url?long_url=...` | Yes | Deletes the authenticated user’s mapping and returns `204`. |
-| `GET` | `/{short_code}` | No | Public redirect to the original URL. |
-
-The edit request must include both fields:
-
-```json
-{
-  "short_code": "AbC123Xy",
-  "new_url": "https://example.com/new-destination",
-  "expires_in_minutes": 120
-}
-```
-
-Supported edit lifetimes are:
-
-| Selection | `expires_in_minutes` | Meaning |
-| --- | --- | --- |
-| 30 minutes | `30` | Expiry is calculated 30 minutes from edit time. |
-| 2 hours | `120` | Expiry is calculated 2 hours from edit time. |
-| 1 week | `10080` | Expiry is calculated 1 week from edit time. |
-| 1 year | `525600` | Expiry is calculated 365 days from edit time. |
-| No expiry | `null` | Stored expiry is `NULL`; the link never expires. |
-
-Other numeric lifetimes are rejected with `400 Invalid link lifetime`. Editing the same row is allowed; moving a destination onto a different live row owned by the same user returns `409`.
-
----
-
-## Redirects and expiry
-
-- Short codes are eight Base62 characters.
-- Codes are derived from the owning user and long URL, so different users receive different codes for the same destination.
-- Redis and Postgres expiry checks use the stored `expires_at`.
-- Direct API behavior is:
-  - valid code: `307` with a `Location` header;
-  - unknown or malformed code: `404`;
-  - expired code: `410`.
-- Production domain behavior is:
-  - valid code: browser is redirected to the original website;
-  - unknown code: browser shows `/missing`;
-  - expired code: browser shows `/expired`.
-
-The Next.js proxy is the fallback used when a short-code request reaches the web service directly. Nginx routes production eight-character short codes to the web service.
-
----
-
-## Redis cache
-
-Postgres remains authoritative. Redis accelerates repeated lookups and preserves expiry metadata.
-
-Each cached short URL is stored as a JSON string under two keys:
-
-```text
-url:user:{user_id}:{long_url}
-url:code:{short_code}
-```
-
-The cached JSON includes `id`, `long_url`, `short_code`, creation/update timestamps, and `expires_at`.
-
-Cache behavior:
-
-- Reads check Redis before Postgres.
-- Expiring entries use a Redis TTL equal to their remaining lifetime.
-- Unlimited entries are stored persistently, with `"expires_at": null`.
-- Expired cache entries are treated as misses or dead links.
-- Edits refresh both keys; deletions remove both keys.
-- Redis failures are logged and fall back to Postgres rather than failing the request.
-- `GET /api/urls` always reads the complete user listing from Postgres.
-
----
-
-## Environment variables
-
-Defined in `.env` (see `.env.example`):
-
-| Variable | Purpose |
+| Variable | Used by |
 | --- | --- |
-| `POSTGRES_USER` | Postgres user |
-| `POSTGRES_PASSWORD` | Postgres password |
-| `POSTGRES_DB` | Postgres database name |
-| `DATABASE_URL` | Host-view connection string used by local API runs and the `sqlx` CLI (`localhost`). The API container gets its own `db:5432` URL from `docker-compose.yaml`. |
-| `REDIS_URL` | Host-view Redis connection used locally (`127.0.0.1`). The API container uses `redis:6379`. |
-| `APP_URL` | Network interface bound by the Rust API. |
-| `APP_PORT` | Port bound by the Rust API. |
-| `JWT_SECRET` | Secret used to sign authentication tokens. |
-| `API_URL` | Server-side API address used by the web service’s short-code fallback. Compose sets this to `http://api:8080`. |
-| `NODE_ENV` | Runtime mode for the web container. |
-| `RUST_LOG` | API logging level in Compose. |
+| `POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB` | Compose `db`, API container `DATABASE_URL` |
+| `DATABASE_URL` | Local `cargo` runs + `sqlx` CLI (`localhost`); Compose overrides to `db:5432` |
+| `REDIS_URL` | Local (`127.0.0.1`); Compose overrides to `redis:6379` |
+| `APP_URL / APP_PORT` | Interface + port the Rust API binds (`0.0.0.0:8080`) |
+| `JWT_SECRET` | Token signing (required, no default) |
+| `API_URL` | Server-side API base for the web short-code fallback (`http://api:8080` in Compose) |
+| `NODE_ENV / RUST_LOG` | Web mode / API log level in Compose |
 
 ---
 
 ## Notes
 
-- The Postgres schema lives in `apps/api/migrations/` and is **not** applied automatically; run `npm run migrate:up` after starting the database.
-- Generated files in `packages/shared-types/src/generated/` are checked in so the frontend and Docker builds work without running Rust first. Regenerate them with `npm run generate-types` after DTO changes.
-- The Next.js standalone Docker image expects those generated files to exist at build time.
-- Postgres data persists in the `db_data` volume. Redis has no Compose volume and is treated as ephemeral cache state.
-- Rebuilding services can leave old untagged images. That is normal Docker behavior; remove only dangling images if disk space becomes an issue, and never prune volumes unless persistent database data may be deleted.
-- Because Nginx serves everything from a single origin, the browser never makes cross-origin requests.
+- Generated `packages/shared-types/src/generated/` files are checked in intentionally.
+- Postgres data persists in the `db_data` volume; Redis is ephemeral (no volume).
+- Rebuilds may leave dangling images — normal Docker behavior; never prune volumes unless you intend to delete DB data.
+- Because nginx serves UI + API + short links from one origin, the browser never makes cross-origin requests.
+
+---
+
+*Companion to [yogesharma.in/writing/url-shortener](https://www.yogesharma.in/writing/url-shortener) — if something here is unclear, that post is the design rationale; if something there is abstract, this repo is the concrete answer.*
