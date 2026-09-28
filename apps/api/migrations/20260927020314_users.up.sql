@@ -1,7 +1,7 @@
 -- Add up migration script here
 create table users (
     id uuid primary key,
-    name varchar(50) unique not null,
+    name varchar(50) not null,
     email varchar(255) unique not null,
     phone varchar(20) unique,
     password varchar(255) not null,
