@@ -17,8 +17,8 @@ This repo implements exactly that path — no more, no less.
 
 | Blog idea | What this repo does |
 | --- | --- |
-| **Reverse proxy / API gateway** | `nginx` is the single entrypoint. `:80` redirects to HTTPS, `:443` (Cloudflare Origin certs) routes `/api/*` to the Rust API, `/{8-char-code}` + `/` to Next.js. |
-| **Horizontally scaled API** | 3 identical Axum replicas (`api1`, `api2`, `api3`) behind nginx round-robin (`api_upstream`). |
+| **Reverse proxy + load balancer (nginx)** | `nginx` is the single entrypoint. `:80` redirects to HTTPS, `:443` (Cloudflare Origin certs) routes `/api/*` to the Rust API, `/{8-char-code}` + `/` to Next.js. `/api/*` is load-balanced round-robin across 3 backend containers. |
+| **3 backend containers to mimic servers** | `api1`, `api2`, `api3` are 3 identical Axum replicas (`api_upstream`) so nginx has something to balance across — mimics 3 backend servers locally. |
 | **Cache in front of the DB** | Redis cache-aside. Reads check Redis first, miss falls through to Postgres and repopulates Redis. Redis failures log and fall back to Postgres. |
 | **Write-through / invalidate on write** | Create warms both cache keys. Edit refreshes both keys (deletes the old `user → url` key). Delete removes both keys. |
 | **Short-key generation** | `SHA256(user_id \| long_url [\| salt])` → Base62 (8 chars). Up to 5 attempts with a random salt on global `short_code` collision. Per-user: same user + same URL returns the existing active row (`200`), otherwise creates (`201`). |
@@ -70,9 +70,14 @@ reach them.
 
 ## How it works (blog → code)
 
-### 1. Gateway routing (`nginx.conf`)
+### 1. Reverse proxy + load balancer (`nginx.conf`)
 
-- `location /api/` → `http://api_upstream` (`api1:8080`, `api2:8080`, `api3:8080`, round-robin).
+nginx does **both jobs**:
+
+- **Reverse proxy:** single origin that routes by path — `/api/` → Rust API, 8-char short codes + `/` → Next.js.
+- **Load balancer:** `upstream api_upstream { server api1:8080; server api2:8080; server api3:8080; }` distributes `/api/*` requests **round-robin** (nginx default) across the 3 backend containers, which exist to mimic 3 servers locally.
+
+- `location /api/` → `http://api_upstream` (round-robin above).
 - `location ~ "^/[0-9A-Za-z]{8}$"` → `web:3000` so unknown/expired codes render friendly pages instead of raw JSON.
 - `location /` → `web:3000`.
 - `:80` unconditionally returns `301 https://...`; `:443` serves TLS with `./certs/fullchain.pem` + `./certs/privkey.pem` (Cloudflare Origin certs for Full-Strict).
